@@ -91,6 +91,12 @@ For running a single run of the one-tree or dual-tree approach, you have to use 
 
 The hyperparameter search can be performed using the script `run_hp_opt.sh` in the corresponding directory.
 
-In the directory `evaluation`, you can find the python files that retrain the models for the best found hyperparameters, i.e., `one_tree_opt.py`, `two_tree_opt.py`, and `rel_threshold_optimizer_opt.py`.
+In the directory `evaluation`, you can find the python files that retrain the models for the best found hyperparameters, i.e., `one_tree_opt.py` and `two_tree_opt.py`.
+These calculate the hypervolumes for all trade-off curves and in this way get the best hyperparameter values (those that maximize the hypervolume). The optimization scheme gives us 15 best curves (one per hold-out).
+
+The alternative optimization scheme is the one of the evolutionary algorithms (NSGA-II and SMS-EMOA), which can be found in the folder `algos_evolutionary`.
+
+Finally, we use `evaluation/get_avg_best_trade_offs.py` which uses these 15 best curves to calculate the average curve plots per method as well as a set of other evaluation metrics. The evaluation metrics are saved to a csv file.
 
 Be careful to pass the correct paths as arguments.
+
