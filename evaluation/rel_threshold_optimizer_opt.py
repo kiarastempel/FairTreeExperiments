@@ -1,13 +1,21 @@
+import sys
+
+sys.path.append('../algos_two_trees')
+sys.path.append('../algos_one_tree')
+sys.path.append('../fairlearn_relaxed_threshold_optimizer')
+sys.path.append('../evaluation')
+sys.path.append('../')
+
 import numpy as np
 import argparse
-from algos_two_trees.get_data import *
-from algos_two_trees.method import *
+from get_data import *
+from method import *
 from constants import PROJECT_ROOT
 import sys
 from sklearn.model_selection import train_test_split, KFold, ParameterGrid
-from evaluation.evaluation_metrics import autoc
-from algos_one_tree.method import *
-from fairlearn_relaxed_threshold_optimizer.postprocessing import ThresholdOptimizer
+from evaluation_metrics import autoc
+from method import *
+from postprocessing import ThresholdOptimizer
 
 
 seed = 42

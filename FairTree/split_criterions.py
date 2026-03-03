@@ -1,7 +1,12 @@
-import FairTree.leaf_outcomes as lo
+import sys
+
+sys.path.append('../FairTree')
+sys.path.append('../algos_two_trees')
+
+import leaf_outcomes as lo
 import math
 import numpy as np
-from algos_two_trees.utils import statistical_parity_diff
+from utils import statistical_parity_diff
 
 
 def information_gain(dataset, subsets, classes, attribute_idx=-1, sensitive_data=None,

@@ -1,9 +1,13 @@
+import sys
+sys.path.append('../evaluation')
+sys.path.append('../')
+
 import argparse
 import os
 from constants import PROJECT_ROOT
 import numpy as np
 import pandas as pd
-from evaluation.evaluation_metrics import autoc
+from evaluation_metrics import autoc
 from scipy.stats import ttest_ind
 
 

@@ -1,10 +1,11 @@
 #  Copyright (c) 2023 Kiara Stempel
 #  All rights reserved.
-
+import sys
+sys.path.append('../FairTree')
 import time
 import numpy as np
 import copy
-from FairTree.split_criterions import *
+from split_criterions import *
 from scipy.spatial.distance import pdist, squareform
 from collections import Counter
 # from utils import plot_split_values_per_feature
@@ -54,7 +55,7 @@ class FairTree:
         self.data = data.to_numpy().tolist()
         self.idx_target = idx_target
         # array with strings of class names (classification) or all possible values (regression)
-        self.target_classes = data[self.all_attributes[self.idx_target]].unique()
+        self.target_classes = sorted(data[self.all_attributes[self.idx_target]].unique())
         self.sensitive_classes = list(set(sensitive))
 
         # might be needed (depends on implementation)
@@ -69,6 +70,8 @@ class FairTree:
         self.sens_threshold = sens_threshold
         self.gamma = gamma
         self.backtracking = backtracking
+        self.gain_s = {}
+        self.gain_y = {}
 
     def print_tree(self):
         """
@@ -118,22 +121,24 @@ class FairTree:
                     print(indent + str(node.label) + " > " + str(node.threshold) + " : ")
                     self.print_node(rightChild, indent + "|	")
 
-    def fit(self, min_samples_leave=40, max_depth=30, type="performance", h_limit=0.01):
+    def fit(self, min_samples_leave=40, max_depth=30, tree_type="performance", max_h_y=1.1, min_h_s=0.0):
         """
         Build a fair decision tree from the training set (self.data). It can be a classifier or regressor, depending on
         the target variable. If sens_threshold is set for gain_s and self.tree contains None after fitting, it means
         that no tree can be found that fulfills the threshold condition.
 
+        :param tree_type: str
+        :type tree_type: if the tree is optimized for "fairness", "performance", or "both"
         :param min_samples_leave: minimum number of training instances that should end in a leaf node of the tree
         :type min_samples_leave: int
         :param max_depth: maximum depth that the trained tree should have
         :type max_depth: int
         """
         self.tree = self.recursive_generate_tree(self.data, self.used_attributes, self.sensitive_data,
-                                                 min_samples_leave, max_depth, type, h_limit)
+                                                 min_samples_leave, max_depth, tree_type, max_h_y, min_h_s)
 
     def recursive_generate_tree(self, current_data, current_attributes, current_sens_data,
-                                min_samples_leave, max_depth, tree_type, h_limit):
+                                min_samples_leave, max_depth, tree_type, max_h_y, min_h_s):
         """
         Recursive function for building a fair decision tree regressor
 
@@ -170,7 +175,7 @@ class FairTree:
                 # (and in case of numerical attributes in addition a corresponding threshold) that splits the data such
                 # that the target attribute is described best
                 (best, best_threshold, splits, sens_data_splits) = self.find_best_split(
-                    current_data, current_attribute_copy, current_sens_data, min_samples_leave, tree_type, h_limit)
+                    current_data, current_attribute_copy, current_sens_data, min_samples_leave, tree_type, max_h_y, min_h_s)
                 # check if the tree should be allowed to grow at this node (max depth/min samples reached?)
                 if best != -1 and best != -2 and max_depth - 1 > 0:
                     remainingAttributes = current_attributes[:]
@@ -189,7 +194,8 @@ class FairTree:
                                                              min_samples_leave,
                                                              max_depth - 1,
                                                              tree_type,
-                                                             h_limit)
+                                                             max_h_y,
+                                                             min_h_s)
                         if child is None:
                             child_is_none = True
                             break
@@ -211,7 +217,7 @@ class FairTree:
                     return Node(True, leaf_model, None)
             return None
 
-    def find_best_split(self, current_data, current_attributes, current_sens_data, min_samples_leave, tree_type, h_limit):
+    def find_best_split(self, current_data, current_attributes, current_sens_data, min_samples_leave, tree_type, max_h_y, min_h_s):
         """
         Find attribute and the corresponding threshold that provide the best
         split in terms of MSE/correlation/... improvement
@@ -230,37 +236,123 @@ class FairTree:
         splits = []
         sens_data_splits = []
 
-        # variable for saving the best improvement so far compared to the previous split
-        max_diff = -1 * float("inf")
-        # save index of best attribute
-        best_attribute = -2
-        # threshold value for continuous attributes, set to None for discrete attributes
-        best_threshold = None
-        diffs = {}
-        for attribute in current_attributes:
-            diffs[attribute] = []
-            index_of_attribute = self.all_attributes.index(attribute)
-            if self.is_attr_discrete(attribute):
-                # discrete attribute
-                # discrete_split() calculates for the given specific attribute the improvement of e.g. information gain
-                # compared to the previous split/node and returns the subsets of the data after splitting
-                information_best = self.discrete_split(current_data, attribute, index_of_attribute, min_samples_leave,
-                                                       current_sens_data, tree_type, h_limit)
-                diffs[attribute].append(information_best[4])
+        # in case of Chebyshev
+        if self.split_criterion == "chebyshev":
+            # first step: loop calculating all gain_y and gain_s to find the best reachable gains (save to dicts)
+            diffs = {}
+            for attribute in current_attributes:
+                diffs[attribute] = []
+                index_of_attribute = self.all_attributes.index(attribute)
+                if self.is_attr_discrete(attribute):
+                    self.discrete_split(current_data, attribute, index_of_attribute, min_samples_leave,
+                                        current_sens_data, tree_type, max_h_y, min_h_s)
+                else:
+                    self.numerical_split(current_data, attribute, index_of_attribute, min_samples_leave, diffs,
+                                         current_sens_data, tree_type, max_h_y, min_h_s)
+            # second step: calculate best gain_y and best gain_s
+            if len(self.gain_y.values()) == 0 or len(self.gain_y.values()) == 0:
+                # no valid splitting attribute found -> set current node as leaf
+                return -1, None, None, None
+            best_gain_y = max(self.gain_y.values())
+            best_gain_s = min(self.gain_s.values())
+
+            # third step: find best attribute using Chebychev formula
+            z1 = best_gain_y
+            z2 = best_gain_s
+            best_key = None
+            best_distance = float("inf")
+            range_y = max(self.gain_y.values()) - min(self.gain_y.values())
+            range_s = max(self.gain_s.values()) - min(self.gain_s.values())
+
+            for key in self.gain_y:
+                dy = abs(z1 - self.gain_y[key])
+                ds = abs(z2 - self.gain_s[key])
+
+                terms = []
+
+                if range_y > 0:
+                    terms.append((1 - self.gamma) * dy / range_y)
+
+                if range_s > 0:
+                    terms.append(self.gamma * ds / range_s)
+
+                # if both ranges are zero, distance is zero
+                d = max(terms) if terms else 0.0
+                if d < best_distance:
+                    best_distance = d
+                    best_key = key
+
+            index_of_attribute, best_threshold = best_key
+            best_attribute = self.all_attributes[index_of_attribute]
+
+            # fourth step: recalculate splits of data and of sensitive attribute according to chosen best attribute
+            if self.is_attr_discrete(best_attribute):
+                # categorical attribute
+                values = self.attrValues[best_attribute]
+                splits = [[] for _ in values]
+                sens_data_splits = [[] for _ in values]
+
+                for i, row in enumerate(current_data):
+                    for v_idx, v in enumerate(values):
+                        if row[index_of_attribute] == v:
+                            splits[v_idx].append(row)
+                            sens_data_splits[v_idx].append(current_sens_data[i])
+                            break
+
+                best_threshold = None
             else:
                 # numerical attribute
-                # numerical_split() find for one specific attribute the best threshold and returns in that order:
-                # best_attribute (which corresponds to the given specific attribute), best_threshold, splits,
-                # weights_splits, sens_data_splits, max_diff, diffs
-                information_best = self.numerical_split(
-                    current_data, attribute, index_of_attribute, min_samples_leave, diffs, current_sens_data,
-                    tree_type, h_limit)
-            if information_best[4] >= max_diff:
-                splits = information_best[2]
-                sens_data_splits = information_best[3]
-                max_diff = information_best[4]
-                best_attribute = information_best[0]
-                best_threshold = information_best[1]
+                less = []
+                greater = []
+                sensitive_less = []
+                sensitive_greater = []
+
+                for i, row in enumerate(current_data):
+                    if row[index_of_attribute] > best_threshold:
+                        greater.append(row)
+                        sensitive_greater.append(current_sens_data[i])
+                    else:
+                        less.append(row)
+                        sensitive_less.append(current_sens_data[i])
+
+                splits = [less, greater]
+                sens_data_splits = [sensitive_less, sensitive_greater]
+
+            self.gain_y = {}
+            self.gain_s = {}
+
+        else:
+            # variable for saving the best improvement so far compared to the previous split
+            max_diff = -1 * float("inf")
+            # save index of best attribute
+            best_attribute = -2
+            # threshold value for continuous attributes, set to None for discrete attributes
+            best_threshold = None
+            diffs = {}
+            for attribute in current_attributes:
+                diffs[attribute] = []
+                index_of_attribute = self.all_attributes.index(attribute)
+                if self.is_attr_discrete(attribute):
+                    # discrete attribute
+                    # discrete_split() calculates for the given specific attribute the improvement of e.g. information gain
+                    # compared to the previous split/node and returns the subsets of the data after splitting
+                    information_best = self.discrete_split(current_data, attribute, index_of_attribute, min_samples_leave,
+                                                           current_sens_data, tree_type, max_h_y, min_h_s)
+                    diffs[attribute].append(information_best[4])
+                else:
+                    # numerical attribute
+                    # numerical_split() find for one specific attribute the best threshold and returns in that order:
+                    # best_attribute (which corresponds to the given specific attribute), best_threshold, splits,
+                    # weights_splits, sens_data_splits, max_diff, diffs
+                    information_best = self.numerical_split(
+                        current_data, attribute, index_of_attribute, min_samples_leave, diffs, current_sens_data,
+                        tree_type, max_h_y, min_h_s)
+                if information_best[4] >= max_diff:
+                    splits = information_best[2]
+                    sens_data_splits = information_best[3]
+                    max_diff = information_best[4]
+                    best_attribute = information_best[0]
+                    best_threshold = information_best[1]
         return best_attribute, best_threshold, splits, sens_data_splits
 
     def is_attr_discrete(self, attribute):
@@ -280,7 +372,7 @@ class FairTree:
             return True
 
     def numerical_split(self, current_data, attribute, index_of_attribute, min_samples_leave, diffs,
-                        current_sens_data, tree_type, h_limit):
+                        current_sens_data, tree_type, max_h_y, min_h_s):
         """
         Split if attribute is numerical: Try all thresholds for the given attribute for splitting the data and return that attribute/threshold pair
         including all splitting information which causes the maximal correlation or maximum decrease of MSE.
@@ -355,23 +447,26 @@ class FairTree:
 
                     if len(less) >= min_samples_leave and len(greater) >= min_samples_leave:
                         h_correct = True
-                        if tree_type == "fair":
+                        if tree_type == "fair" or tree_type == "both":
                             for s in [sensitive_less, sensitive_greater]:
                                 # calculate entropy of S
                                 e = entropy(s, self.sensitive_classes, "sensitive", s)
-                                if e <= h_limit:
+                                # print("s entropy", e)
+                                if e <= min_h_s:
                                     h_correct = False
-                        elif tree_type == "performance":
+                                    # print("--- break")
+                        if tree_type == "performance" or tree_type == "both":
                             for s in [less, greater]:
                                 # calculate entropy of y
                                 e = entropy(s, self.target_classes, self.idx_target, s)
-                                if e >= h_limit:
+                                # print("y entropy", e)
+                                if e >= max_h_y:
                                     h_correct = False
+                                    # print("--- break")
                         if h_correct:
                             if self.backtracking:
                                 gain_s = information_gain(current_data, [less, greater], self.sensitive_classes, "sensitive",
                                                           [sensitive_less, sensitive_greater], current_sens_data)
-                                #print(gain_s)
                                 if gain_s <= self.sens_threshold:
                                     # calculate gain on y
                                     diff = self.gain(current_data, index_of_attribute, [less, greater],
@@ -381,7 +476,7 @@ class FairTree:
                                     diff = -2
                             else:
                                 diff = self.gain(current_data, index_of_attribute, [less, greater],
-                                                 [sensitive_less, sensitive_greater], current_sens_data)
+                                                 [sensitive_less, sensitive_greater], current_sens_data, threshold)
 
                             # max(-2, -1) = -1 --> if there is at least one split that is fair enough but has too few
                             # samples in a child node, we create a leave
@@ -398,12 +493,10 @@ class FairTree:
                 if best_attribute == -2:
                     best_attribute = -1
             diffs[attribute].append(diff)
-        if best_attribute == -2:
-            print("hi")
         return best_attribute, best_threshold, splits, sens_data_splits, max_diff
 
     def discrete_split(self, current_data, attribute, index_of_attribute, min_samples_leave, current_sensitive_data,
-                       tree_type, h_limit):
+                       tree_type, max_h_y, min_h_s):
         """
         Split if attribute is discrete: split data into subsets according to the instances' values of that attribute.
         Return subsets and difference of gain
@@ -440,18 +533,22 @@ class FairTree:
                 enough_samples = False
         # another if for minimal/maximal information
         h_correct = True
-        if tree_type == "fair":
+        if tree_type == "fair" or tree_type == "both":
             for s in sensitive_subsets:
                 # calculate entropy of S
                 e = entropy(s, self.sensitive_classes, "sensitive", s)
-                if e <= h_limit:
+                # print("s entropy", e)
+                if e <= min_h_s:
                     h_correct = False
-        elif tree_type == "performance":
+                    # print("--- break")
+        elif tree_type == "performance" or tree_type == "both":
             for s in subsets:
                 # calculate entropy of y
                 e = entropy(s, self.target_classes, self.idx_target, s)
-                if e >= h_limit:
+                # print("y entropy", e)
+                if e >= max_h_y:
                     h_correct = False
+                    # print("--- break")
         if enough_samples and h_correct:
             if self.backtracking:
                 gain_s = information_gain(current_data, subsets, self.sensitive_classes, "sensitive",

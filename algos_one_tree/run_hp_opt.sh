@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 datasets=("Compas" "Adult" "Dutch" "German")
-variants=("threshold_gain_s" "weighted_combi" "backtracking")
+variants=("chebyshev")  # "threshold_gain_s" "weighted_combi" "backtracking")
 hp_min_samples=(25 10 1)
 hp_max_depth=(4 6 8 13)
 

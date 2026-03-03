@@ -5,7 +5,7 @@ from sklearn.linear_model import LinearRegression
 import numpy as np
 
 
-def get_major_class(dataset):
+def get_major_class(dataset, classes):
     """
     Calculate majority class of all instances in the given dataset
 
@@ -17,7 +17,7 @@ def get_major_class(dataset):
     :rtype: Any
     """
     # extract all unique classes
-    classes = list({row[-1] for row in dataset})
+    # classes = list({row[-1] for row in dataset})
     freq = [0] * len(classes)
     for row in dataset:
         index = classes.index(row[-1])
@@ -122,7 +122,7 @@ def get_leaf_outcome(leaf_outcome, current_data, attribute, classes):
     if leaf_outcome == "mean":
         return get_mean_label(current_data, attribute)
     elif leaf_outcome == "majority":
-        return get_major_class(current_data)
+        return get_major_class(current_data, classes)
     elif leaf_outcome == "probability":
         return get_probs(current_data, classes)
     else:

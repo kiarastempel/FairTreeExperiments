@@ -1,12 +1,20 @@
+import sys
+
+sys.path.append('../algos_two_trees')
+sys.path.append('../algos_one_tree')
+sys.path.append('../FairTree')
+sys.path.append('../fairlearn_relaxed_threshold_optimizer')
+
 import argparse
 import numpy as np
 from sklearn.model_selection import train_test_split
 from sklearn.tree import DecisionTreeClassifier
-from algos_two_trees.get_data import *
+from get_data import *
 from constants import PROJECT_ROOT
-from algos_two_trees.utils import statistical_parity_diff
+from utils import statistical_parity_diff
 from sklearn.metrics import roc_auc_score, accuracy_score
-from fairlearn_relaxed_threshold_optimizer.postprocessing import ThresholdOptimizer
+from postprocessing import ThresholdOptimizer
+from get_data import data_loader_router
 
 
 seed = 42
@@ -15,28 +23,14 @@ seed = 42
 def main():
     parser = argparse.ArgumentParser(description='Get run values.')
 
-    parser.add_argument('--data', type=str, default='Compas',
+    parser.add_argument('--data', type=str, default='Folktables_AK',
                         help='Dataset to use: Compas, Adult, Banks, German')
 
     args = parser.parse_args()
 
-    if args.data == "Compas":
-        X, y, s, unprivileged_group, pos_outcome = get_compas(
-            os.path.join(PROJECT_ROOT, 'data', 'compas-preprocessed.csv'))
-    elif args.data == "Adult":
-        X, y, s, unprivileged_group, pos_outcome = get_adult()
-    elif args.data == "Banks":
-        X, y, s, unprivileged_group, pos_outcome = get_banks()
-    elif args.data == "German":
-        X, y, s, unprivileged_group, pos_outcome = get_german()
-    elif args.data == "Law":
-        X, y, s, unprivileged_group, pos_outcome = get_law()
-    elif args.data == "Dutch":
-        X, y, s, unprivileged_group, pos_outcome = get_dutch_census()
-    else:
-        raise ValueError("unknown dataset")
+    X, y, s, unprivileged_group, pos_outcome = data_loader_router(args.data, intersectional=False)
 
-    os.makedirs(os.path.join(PROJECT_ROOT, 'results', 'relaxed_threshold_optimizer'), exist_ok=True)
+    os.makedirs(os.path.join(PROJECT_ROOT, 'results_baselines', 'relaxed_threshold_optimizer'), exist_ok=True)
 
     X = X.applymap(lambda x: int(x) if isinstance(x, bool) else x).astype(np.float32)
 
@@ -54,7 +48,7 @@ def main():
         "accs_test": []
     }
 
-    tolerances = np.linspace(0, 0.25, 51)[1:]
+    tolerances = np.linspace(0, 0.25, 25)[1:]
     results["gammas"] = tolerances
 
     for tol in tolerances:
@@ -95,7 +89,7 @@ def main():
 
     # save results to csv
     pd.DataFrame(results).to_csv(
-        os.path.join(PROJECT_ROOT, 'results', 'relaxed_threshold_optimizer', 'relaxed_threshold_optimizer_{}.csv'.format(args.data)))
+        os.path.join(PROJECT_ROOT, 'results_baselines', 'relaxed_threshold_optimizer', 'relaxed_threshold_optimizer_{}.csv'.format(args.data)))
 
 
 if __name__ == "__main__":

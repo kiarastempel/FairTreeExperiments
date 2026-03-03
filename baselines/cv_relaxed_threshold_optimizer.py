@@ -1,3 +1,10 @@
+import sys
+
+sys.path.append('../algos_two_trees')
+sys.path.append('../algos_one_tree')
+sys.path.append('../FairTree')
+sys.path.append('../fairlearn_relaxed_threshold_optimizer')
+
 import numpy as np
 import pandas as pd
 import os
@@ -5,12 +12,12 @@ import argparse
 import copy
 from sklearn.model_selection import train_test_split, KFold
 from sklearn.tree import DecisionTreeClassifier
-from algos_two_trees.get_data import *
+from get_data import *
 from sklearn.metrics import roc_auc_score, accuracy_score
-from algos_two_trees.utils import statistical_parity_diff
+from utils import statistical_parity_diff
 from constants import PROJECT_ROOT
 import warnings
-from fairlearn_relaxed_threshold_optimizer.postprocessing import ThresholdOptimizer
+from postprocessing import ThresholdOptimizer
 
 
 def main():

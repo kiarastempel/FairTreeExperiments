@@ -1,45 +1,58 @@
+import sys
+
+sys.path.append('../algos_two_trees')
+sys.path.append('../algos_one_tree')
+sys.path.append('../FairTree')
+sys.path.append('../')
+
 import numpy as np
 import random
 import argparse
 import copy
 from sklearn.tree import DecisionTreeClassifier, export_text
 from sklearn.model_selection import train_test_split
-from algos_two_trees.get_data import *
+from get_data import *
 from sklearn.metrics import roc_auc_score, accuracy_score
 from sklearn.utils import resample
 import matplotlib.pyplot as plt
-from FairTree.fair_classification_tree import FairClassificationTree
-from algos_two_trees.utils import statistical_parity_diff
+from fair_classification_tree import FairClassificationTree
+from utils import statistical_parity_diff
+from fairlearn.metrics import demographic_parity_difference
 from pydl85 import DL85Classifier, DL85Predictor
 from constants import PROJECT_ROOT
 import time
+import pandas as pd
+import optuna
 
 
 seed = 42
-k = 1
 
 
 def main():
     parser = argparse.ArgumentParser(description='Get run values.')
 
-    parser.add_argument('--data', type=str, default='Compas',
-                        help='Dataset to use: Compas, Adult, Banks, German, Law, Dutch')
+    parser.add_argument('--data', type=str, default='Adult',
+                        help='Dataset to use: Compas, Adult, Banks, German, Law, Dutch, Folktables_AK, Folktables_HI')
 
     parser.add_argument('--predict_type', type=str, default='predict_proba',
                         help='Type of prediction, has to be in ["predict", "predict_proba"]')
 
-    parser.add_argument('--fair_tree_variant', type=str, default='fair_ensemble',
+    parser.add_argument('--fair_tree_variant', type=str, default='fairness_gain',
                         help='Type of tree that will be used as "fair" tree, has to be in '
-                             '["fairness_gain", "fair_ensemble", "optimal_gain_s", "optimal_spd"]')
+                             '["fairness_gain", "fair_ensemble", "optimal_gain_s", "optimal_spd", "backtracking"]')
 
     parser.add_argument('--num_fair_ensemble', type=int, default='1',
                         help='If fair_ensemble is chosen as tree variant for the fair tree: number of ensemble members')
 
     parser.add_argument('--performance_tree_variant', type=str, default='own',
                         help='Type of tree that will be used as "fair" tree, has to be in '
-                             '["sklearn", "own", "optimal"]')
+                             '["sklearn", "own", "performance_ensemble", "optimal", "backtracking"]')
 
-    parser.add_argument('--split_criterion', type=str, default='gain_s',
+    parser.add_argument('--num_performance_ensemble', type=int, default='1',
+                        help='If performance_ensemble is chosen as tree variant for the performance tree: '
+                             'number of ensemble members')
+
+    parser.add_argument('--split_criterion', type=str, default='threshold_constraint',
                         help='Indicates which method is used in split criterion for the fair tree, has to be in '
                              '["information_gain", "gain_s", "spd", "threshold_constraint"]')
 
@@ -47,17 +60,26 @@ def main():
                         help='Which value or model is saved in the leaves to give a tree output, has to be in '
                              '["mean", "majority"]')
 
-    parser.add_argument('--max_depth', type=int, default='6',
+    parser.add_argument('--max_depth_y', type=int, default='4',
                         help='Maximum depth of optimal tree (for deeper trees runtime increases)')
 
-    parser.add_argument('--min_samples', type=int, default='25',
+    parser.add_argument('--max_depth_s', type=int, default='8',
+                        help='Maximum depth of optimal tree (for deeper trees runtime increases)')
+
+    parser.add_argument('--max_depth_meta', type=int, default='10',
+                        help='Maximum depth of meta tree combining the predictions')
+
+    parser.add_argument('--min_samples_y', type=int, default='25',
                         help='Minimum samples per leave')
 
-    parser.add_argument('--max_h_y', type=float, default='0.01',
+    parser.add_argument('--min_samples_s', type=int, default='25',
+                        help='Minimum samples per leave')
+
+    parser.add_argument('--max_h_y', type=float, default='1.1',
                         help="Maximum entropy/uncertainty that should be there regarding y in a leaf of the performance"
                              "tree")
 
-    parser.add_argument('--min_h_s', type=float, default='0.01',
+    parser.add_argument('--min_h_s', type=float, default='0.0',
                         help="Minimum entropy/uncertainty that should be there regarding s in a leaf of the fair"
                              "tree")
 
@@ -74,25 +96,16 @@ def main():
     parser.add_argument('--print_trees', action='store_true',
                         help='Print the trees for interpretation')
 
+    parser.add_argument('--intersectional', action='store_true',
+                        help='Employ multiple sensitive attributes in data loaders')
+
     args = parser.parse_args()
 
-    if args.data == "Compas":
-        X, y, s, unprivileged_group, pos_outcome = get_compas(os.path.join(PROJECT_ROOT, 'data', 'compas-preprocessed.csv'))
-    elif args.data == "Adult":
-        X, y, s, unprivileged_group, pos_outcome = get_adult()
-    elif args.data == "Banks":
-        X, y, s, unprivileged_group, pos_outcome = get_banks()
-    elif args.data == "German":
-        X, y, s, unprivileged_group, pos_outcome = get_german()
-    elif args.data == "Law":
-        X, y, s, unprivileged_group, pos_outcome = get_law()
-    elif args.data == "Dutch":
-        X, y, s, unprivileged_group, pos_outcome = get_dutch_census()
-    else:
-        raise ValueError("unknown dataset")
+    X, y, s, unprivileged_group, pos_outcome = data_loader_router(args.data, args.intersectional)
 
-    os.makedirs(os.path.join(PROJECT_ROOT, 'plots', 'predictions'), exist_ok=True)
-    os.makedirs(os.path.join(PROJECT_ROOT, 'results', 'tradeoffs_two_trees'), exist_ok=True)
+    os.makedirs(os.path.join(PROJECT_ROOT, 'plots_MLJ', 'predictions'), exist_ok=True)
+    os.makedirs(os.path.join(PROJECT_ROOT, 'results_MLJ', 'tradeoffs_two_trees'), exist_ok=True)
+    os.makedirs(os.path.join(PROJECT_ROOT, 'algo_two_trees_visualization_MLJ'), exist_ok=True)
 
     X = X.applymap(lambda x: int(x) if isinstance(x, bool) else x).astype(np.float32)
 
@@ -105,52 +118,57 @@ def main():
 
     combine_trees(X_train, X_test, y_train, y_test, s_train, s_test, unprivileged_group, pos_outcome, args.predict_type,
                   args.data, args.fair_tree_variant, args.num_fair_ensemble, args.performance_tree_variant,
-                  args.leaf_outcome_method, args.split_criterion,
-                  args.max_depth, args.min_samples, args.max_h_y, args.min_h_s,
-                  args.num_gammas, args.timed_run, args.timed_ncols, args.timed_nrows, print_trees=True)
+                  args.num_performance_ensemble, args.leaf_outcome_method, args.split_criterion,
+                  args.max_depth_y, args.max_depth_s, None, args.min_samples_y, args.min_samples_s,
+                  args.max_h_y, args.min_h_s,
+                  args.num_gammas, args.timed_run, args.timed_ncols, args.timed_nrows, print_trees=True,
+                  intersectional=args.intersectional)
 
 
 def combine_trees(X_train, X_test, y_train, y_test, s_train, s_test, unprivileged_group, pos_outcome, predict_type,
-                  data, fair_tree_variant, num_fair_ensemble, performance_tree_variant, leaf_outcome_method,
-                  split_criterion, max_depth, min_samples, max_h_y, min_h_s,
-                  num_gammas, timed_run, n_cols, n_rows, print_trees):
+                  data, fair_tree_variant, num_fair_ensemble, performance_tree_variant, num_performance_ensemble,
+                  leaf_outcome_method, split_criterion, max_depth_y, max_depth_s, max_depth_meta,
+                  min_samples_y, min_samples_s, max_h_y, min_h_s,
+                  num_gammas, timed_run, n_cols, n_rows, print_trees, intersectional=False):
     X_train, y_train, s_train = resample(X_train, y_train, s_train, replace=True, n_samples=5000, random_state=seed)
     if timed_run:
         start_time = time.time()
     # get predictions of both separate trees
     y_preds_train, y_preds_test = create_performance_tree(X_train, y_train, s_train, X_test, y_test,
-                                                          performance_tree_variant, predict_type,
-                                                          max_depth, min_samples, max_h_y, leaf_outcome_method,
+                                                          performance_tree_variant, num_performance_ensemble,
+                                                          predict_type,
+                                                          max_depth_y, min_samples_y, max_h_y, leaf_outcome_method,
                                                           unprivileged_group, pos_outcome, split_criterion, print_trees)
-    # todo: create fair ensemble instead using bootstrapping
     fair_preds_train, fair_preds_test = create_fair_tree(X_train, y_train, s_train, X_test, y_test, fair_tree_variant,
                                                          num_fair_ensemble, predict_type,
-                                                         max_depth, min_samples, min_h_s, leaf_outcome_method,
+                                                         max_depth_s, min_samples_s, min_h_s, leaf_outcome_method,
                                                          unprivileged_group, pos_outcome, split_criterion, print_trees)
 
     # gamma sweep: combine separate predictions using various gamma values
-    results = gamma_sweep(predict_type, y_preds_train, y_preds_test, fair_preds_train, fair_preds_test, s_train, s_test,
-                          y_train, y_test, unprivileged_group, pos_outcome, data, fair_tree_variant,
-                          performance_tree_variant, split_criterion, num_gammas, timed_run, print_trees)
+    results = gamma_sweep(X_train, predict_type, y_preds_train, y_preds_test, fair_preds_train, fair_preds_test, s_train, s_test,
+                          y_train, y_test, unprivileged_group, pos_outcome, max_depth_y, min_samples_y, data, fair_tree_variant,
+                          performance_tree_variant, max_depth_meta, split_criterion, num_gammas, timed_run, print_trees,
+                          intersectional=intersectional)
     
     # save results to csv
     if timed_run:
         end_time = time.time()
         time_results = pd.DataFrame({'time elapsed': [end_time - start_time],
                                      'number of cols': n_cols, 'number of rows': n_rows,
-                                     'max_depth': max_depth})
-        file_path = os.path.join(PROJECT_ROOT, 'results', 'tradeoffs_two_trees', 'time_{}_{}_FAIR{}_PERF{}_({}).csv'.format(
+                                     'max_depth_y': max_depth_y, 'max_depth_s': max_depth_s})
+        file_path = os.path.join(PROJECT_ROOT, 'results_MLJ', 'tradeoffs_two_trees', 'time_{}_{}_FAIR{}_PERF{}_({}).csv'.format(
             data, predict_type, fair_tree_variant, performance_tree_variant, split_criterion))
         header = not os.path.exists(file_path) 
         time_results.to_csv(file_path, mode='a', header=header, index=False)
     else:
         pd.DataFrame(results).to_csv(
-            os.path.join(PROJECT_ROOT, 'results', 'tradeoffs_two_trees', 'h_limit_ensemble_results_k_{}_{}_{}_FAIR{}_PERF{}_({}).csv'.format(
-                k, data, predict_type, fair_tree_variant, performance_tree_variant, split_criterion)))
+            os.path.join(PROJECT_ROOT, 'results_MLJ', 'tradeoffs_two_trees',
+                         'new_results_maxdepth_y_{}_maxdepth_s_{}_{}_{}_FAIR{}_PERF{}_({}).csv'.format(
+                          max_depth_y, max_depth_s, data, predict_type, fair_tree_variant, performance_tree_variant, split_criterion)))
         
  
-def create_performance_tree(X_train, y_train, s_train, X_test, y_test, tree_variant, predict_type, max_depth,
-                            min_samples, max_h_y,
+def create_performance_tree(X_train, y_train, s_train, X_test, y_test, tree_variant, num_performance_ensemble,
+                            predict_type, max_depth, min_samples, max_h_y,
                             leaf_outcome_method, unprivileged_group, pos_outcome, split_criterion, print_trees):
     if tree_variant == "sklearn":
         y_tree = DecisionTreeClassifier(max_depth=max_depth, min_samples_leaf=min_samples)
@@ -180,13 +198,50 @@ def create_performance_tree(X_train, y_train, s_train, X_test, y_test, tree_vari
                                         threshold_binning=10,
                                         sensitive=np.array(s_train.values).flatten().tolist(),
                                         leaf_outcome=leaf_outcome_method, split_criterion="information_gain")
-        y_tree.fit(max_depth=max_depth, min_samples_leave=min_samples, type="performance", h_limit=max_h_y)
+        y_tree.fit(max_depth=max_depth, min_samples_leave=min_samples, tree_type="performance", max_h_y=max_h_y)
         if print_trees:
             print("performance tree")
             y_tree.print_tree()
 
         y_preds_train = np.array(y_tree.predict(X_train_fair[cols]))
         y_preds_test = np.array(y_tree.predict(X_test_fair[cols]))
+
+    elif tree_variant == "performance_ensemble":
+        print("creating ensemble")
+        X_train_fair = copy.deepcopy(X_train)
+        X_train_fair['y'] = y_train
+        X_test_fair = copy.deepcopy(X_test)
+        X_test_fair['y'] = y_test
+        cols = X_train.columns.tolist()
+        # bootstrap
+        # k (=num_performance_ensemble) times, sample n many instances from the dataset
+        ensemble = []
+        predictions_train = []
+        predictions_test = []
+        for b in range(num_performance_ensemble):
+            print("tree ", b)
+            X_boot, y_boot, s_boot = resample(X_train, y_train, s_train, replace=True, random_state=b * 10)
+            # transform these into needed dataframe format
+            X_train_boot = copy.deepcopy(X_boot)
+            X_train_boot['y'] = y_boot
+            cols = X_boot.columns.tolist()
+            # call performance tree
+            y_tree = FairClassificationTree(data=X_train_boot, attributes=cols, idx_target=-1,
+                                            unprivileged_group=unprivileged_group, pos_outcome=pos_outcome,
+                                            threshold_binning=10,
+                                            sensitive=np.array(s_boot.values).flatten().tolist(),
+                                            leaf_outcome="probability", split_criterion="information_gain")
+            y_tree.fit(max_depth=max_depth, min_samples_leave=min_samples, tree_type="performance", max_h_y=max_h_y)
+            # save tree to list of trees (=ensemble)
+            ensemble.append(y_tree)
+            predictions_train.append(np.array(y_tree.predict(X_train_boot[cols])))
+            predictions_test.append(np.array(y_tree.predict(X_test_fair[cols])))
+
+        # result: ensemble of k performance trees
+
+        # predict: average the class probabilities
+        y_preds_train = np.mean(predictions_train, axis=0)
+        y_preds_test = np.mean(predictions_test, axis=0)
 
     elif tree_variant == "optimal":
         clf = DL85Classifier(max_depth=max_depth, min_sup=min_samples)
@@ -221,7 +276,7 @@ def create_fair_tree(X_train, y_train, s_train, X_test, y_test, tree_variant, nu
                                            threshold_binning=10,
                                            sensitive=np.array(s_train.values).flatten().tolist(),
                                            leaf_outcome=leaf_outcome_method, split_criterion=split_criterion)
-        fair_tree.fit(max_depth=max_depth, min_samples_leave=min_samples, type="fair", h_limit=min_h_s)
+        fair_tree.fit(max_depth=max_depth, min_samples_leave=min_samples, tree_type="fair", min_h_s=min_h_s)
         if print_trees:
             print("fair tree")
             fair_tree.print_tree()
@@ -253,7 +308,7 @@ def create_fair_tree(X_train, y_train, s_train, X_test, y_test, tree_variant, nu
                                                threshold_binning=10,
                                                sensitive=np.array(s_boot.values).flatten().tolist(),
                                                leaf_outcome="probability", split_criterion=split_criterion)
-            fair_tree.fit(max_depth=max_depth, min_samples_leave=min_samples, type="fair")
+            fair_tree.fit(max_depth=max_depth, min_samples_leave=min_samples, tree_type="fair", min_h_s=min_h_s)
             # save tree to list of trees (=ensemble)
             ensemble.append(fair_tree)
             predictions_train.append(np.array(fair_tree.predict(X_train_boot[cols])))
@@ -331,16 +386,46 @@ def combined_predict(y_preds, s_preds, gamma):
     return preds >= 0.5
 
 
-def combined_predict_proba(y_preds, s_preds, gamma):
-    preds_1 = (1 - gamma) * y_preds
-    preds_2 = gamma * s_preds
-    preds = (1 - gamma) * y_preds + gamma * s_preds
+def combined_predict_proba(y_preds, s_preds, gamma, meta_tree=None):
+    if meta_tree is None:
+        preds = (1 - gamma) * y_preds + gamma * s_preds
+    else:
+        df_meta = pd.DataFrame({
+            "y_preds": [p[0] for p in y_preds],
+            "fair_preds": [p[0] for p in s_preds]
+        })
+
+        meta_out = meta_tree.predict(df_meta)
+
+        # Convert to list to be safe
+        meta_out = list(meta_out)
+
+        if len(meta_out) == 0:
+            raise ValueError("meta_out is empty")
+
+        # Shape of first element
+        first_shape = np.shape(meta_out[0])
+        first_type = type(meta_out[0])
+
+        for i, el in enumerate(meta_out):
+            if np.shape(el) != first_shape or type(el) != first_type:
+                print("\n=== INCONSISTENT ELEMENT DETECTED ===")
+                print("First element: type =", first_type, "shape =", first_shape)
+                print("Bad element index:", i)
+                print("Type:", type(el))
+                print("Shape:", np.shape(el))
+                print("Value:", el)
+                raise ValueError("Inhomogeneous prediction shape detected")
+
+        preds = np.asarray(meta_out)
+
     return np.argmax(preds >= 0.5, axis=1)
 
 
-def gamma_sweep(predict_type, y_preds_train, y_preds_test, fair_preds_train, fair_preds_test, s_train, s_test,
-                y_train, y_test, unprivileged_group, pos_outcome, data, fair_tree_variant, performance_tree_variant,
-                split_criterion, num_gammas, timed_run, print_trees):
+def gamma_sweep(X_train, predict_type, y_preds_train, y_preds_test, fair_preds_train, fair_preds_test, s_train, s_test,
+                y_train, y_test, unprivileged_group, pos_outcome, max_depth, min_samples, data, fair_tree_variant,
+                performance_tree_variant, max_depth_meta, split_criterion, num_gammas, timed_run, print_trees,
+                intersectional=False, combination="meta_tree"):
     results = {
         "gammas": [],
         "spds_train": [],
@@ -384,6 +469,34 @@ def gamma_sweep(predict_type, y_preds_train, y_preds_test, fair_preds_train, fai
 
     gammas = np.linspace(0, 1, num_gammas)
     results["gammas"] = gammas
+
+    if combination in ["meta_tree_optimization", "meta_tree"]:
+        # ----- split data into train and validation -----
+        meta_X_train = pd.DataFrame(
+            {"y_preds": [p[0] for p in y_preds_train], "fair_preds": [p[0] for p in fair_preds_train], 'y': y_train})
+        meta_X_test = pd.DataFrame(
+            {"y_preds": [p[0] for p in y_preds_test], "fair_preds": [p[0] for p in fair_preds_test], 'y': y_test})
+
+        meta_train, meta_val, s_train_split, s_val_split, y_train_split, y_val_split = train_test_split(
+            meta_X_train,
+            s_train,
+            y_train,
+            test_size=0.5,
+            random_state=42,
+            stratify=meta_X_train["y"]
+        )
+
+        # ----- calculate AUROC of y_preds_test and SPD of y_fair_test to save as AUROC_optimal and SPD_optimal -----
+        auroc_optimal = roc_auc_score(y_train, np.argmax(y_preds_train >= 0.5, axis=1))
+        spd_optimal = statistical_parity_diff(
+            np.argmax(fair_preds_train >= 0.5, axis=1),
+            s_train.squeeze().to_numpy(),
+            unprivileged_group=unprivileged_group,
+            pos_outcome=pos_outcome
+        )
+
+        cols = ["y_preds", "fair_preds"]
+
     for i, gamma in enumerate(gammas):
         if print_trees:
             print("iteration", str(i))
@@ -392,12 +505,76 @@ def gamma_sweep(predict_type, y_preds_train, y_preds_test, fair_preds_train, fai
         # gamma closer to 1: s-tree impacts prediction more
         # gamma closer to 0: y-tree impacts prediction more
 
-        if predict_type == "predict_proba":
+        if combination == "meta_tree_optimization":
+            def objective(trial):
+                # Suggest values for the hyperparameters
+                max_depth = trial.suggest_int("max_depth", 1, 10)
+                min_samples = trial.suggest_int("min_samples", 2, len(y_train_split) / 4)
+
+                # ----- train tree -----
+                model = FairClassificationTree(data=meta_val, attributes=cols, idx_target=-1,
+                                               unprivileged_group=unprivileged_group, pos_outcome=pos_outcome,
+                                               threshold_binning=10,
+                                               sensitive=np.array(s_val_split.values).flatten().tolist(),
+                                               leaf_outcome="probability", split_criterion="chebyshev",
+                                               gamma=gamma)
+                model.fit(max_depth=max_depth, min_samples_leave=min_samples, tree_type="meta_tree_optimization")
+
+                # ----- predict y for validation data -----
+                y_preds_val = np.array(model.predict(meta_val))
+                y_preds_val = np.argmax(y_preds_val >= 0.5, axis=1)
+
+                # ----- calculate AUROC & SPD for validation data -----
+                spd_val = statistical_parity_diff(y_preds_val, np.asarray(s_val_split), unprivileged_group, pos_outcome)
+                auroc_val = roc_auc_score(y_val_split, y_preds_val)
+
+                # calculate chebyshev formula and return as objective
+                chebyshev = max(
+                    (1 - gamma) * abs(auroc_optimal - auroc_val),
+                    gamma * abs(spd_optimal - spd_val)
+                )
+
+                return chebyshev
+
+            # create optuna study & choose optimizer and objective direction
+            study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler())
+            study.optimize(objective, n_trials=30, n_jobs=1)
+
+            # choose best model: retrain model on best found hyperparameters
+            meta_tree = FairClassificationTree(data=meta_val, attributes=cols, idx_target=-1,
+                                               unprivileged_group=unprivileged_group, pos_outcome=pos_outcome,
+                                               threshold_binning=10,
+                                               sensitive=np.array(s_val_split.values).flatten().tolist(),
+                                               leaf_outcome="probability", split_criterion="chebyshev",
+                                               gamma=gamma)
+            meta_tree.fit(max_depth=study.best_trial.params["max_depth"],
+                          min_samples_leave=study.best_trial.params["min_samples"])
+        elif combination == "meta_tree":
+            meta_tree = FairClassificationTree(data=meta_val, attributes=cols, idx_target=-1,
+                                               unprivileged_group=unprivileged_group, pos_outcome=pos_outcome,
+                                               threshold_binning=10,
+                                               sensitive=np.array(s_val_split.values).flatten().tolist(),
+                                               leaf_outcome="probability", split_criterion="chebyshev",
+                                               gamma=gamma)
+            meta_tree.fit(max_depth=max_depth, min_samples_leave=min_samples, tree_type="meta_tree")
+
+        # if meta_tree, call combined_predict_proba using meta_tree
+        if predict_type == "predict_proba" and combination in ["meta_tree_optimization", "meta_tree"]:
+            preds_train = combined_predict_proba(y_preds_train, fair_preds_train, gamma, meta_tree=meta_tree)
+            preds_test = combined_predict_proba(y_preds_test, fair_preds_test, gamma, meta_tree=meta_tree)
+        elif predict_type == "predict_proba" and combination == "linear":
             preds_train = combined_predict_proba(y_preds_train, fair_preds_train, gamma)
             preds_test = combined_predict_proba(y_preds_test, fair_preds_test, gamma)
-        else:
+        elif predict_type == "predict" and combination == "linear":
             preds_train = combined_predict(y_preds_train, fair_preds_train, gamma)
             preds_test = combined_predict(y_preds_test, fair_preds_test, gamma)
+        else:
+            ValueError(f"Combination/predict variant ({combination}/{predict_type}) not implemented")
+
+        # only for visualization
+        X_train['pred'] = preds_train
+        file = os.path.join(PROJECT_ROOT, 'algo_two_trees_visualization_MLJ', 'gamma_' + str(gamma) + ".csv")
+        pd.DataFrame(X_train).to_csv(file)
 
         if not timed_run:
             if predict_type == "predict_proba":
@@ -439,12 +616,20 @@ def gamma_sweep(predict_type, y_preds_train, y_preds_test, fair_preds_train, fai
         previous_preds_train = preds_train
         previous_preds_test = preds_test
 
-        spd_train = statistical_parity_diff(preds_train, np.asarray(s_train), unprivileged_group, pos_outcome)
-        spd_test = statistical_parity_diff(preds_test, np.asarray(s_test), unprivileged_group, pos_outcome)
+        if intersectional:
+            spd_train = demographic_parity_difference(y_train, preds_train, sensitive_features=s_train)
+            spd_test = demographic_parity_difference(y_test, preds_test, sensitive_features=s_test)
+        else:
+            spd_train = statistical_parity_diff(preds_train, np.asarray(s_train), unprivileged_group, pos_outcome)
+            spd_test = statistical_parity_diff(preds_test, np.asarray(s_test), unprivileged_group, pos_outcome)
+
         auroc_train = roc_auc_score(y_train, preds_train)
         auroc_test = roc_auc_score(y_test, preds_test)
         acc_train = accuracy_score(y_train, preds_train)
         acc_test = accuracy_score(y_test, preds_test)
+
+        if auroc_test < 0.5:
+            auroc_test = 1 - auroc_test
 
         results["spds_train"].append(spd_train)
         results["spds_test"].append(spd_test)
@@ -454,7 +639,7 @@ def gamma_sweep(predict_type, y_preds_train, y_preds_test, fair_preds_train, fai
         results["accs_test"].append(acc_test)
 
     if not timed_run:
-        plt.savefig(os.path.join(PROJECT_ROOT, 'plots', 'predictions',
+        plt.savefig(os.path.join(PROJECT_ROOT, 'plots_MLJ', 'predictions',
                                 'predictions_{}_{}_FAIR{}_PERF{}_({})_18.pdf'.format(data, predict_type, fair_tree_variant,
                                                                                 performance_tree_variant,
                                                                                 split_criterion)))

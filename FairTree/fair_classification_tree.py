@@ -1,13 +1,14 @@
 #  Copyright (c) 2023 Kiara Stempel
 #  All rights reserved.
-
+import sys
+sys.path.append('../FairTree')
 import numpy as np
 import pandas as pd
 import math
-from FairTree.fair_decision_tree import FairTree
+from fair_decision_tree import FairTree
 from sklearn.metrics import mutual_info_score
 from sklearn.feature_selection import mutual_info_classif
-from FairTree.split_criterions import *
+from split_criterions import *
 
 
 class FairClassificationTree(FairTree):
@@ -19,7 +20,7 @@ class FairClassificationTree(FairTree):
         super().__init__(data, attributes, idx_target, unprivileged_group, pos_outcome,  threshold_binning,
                          idx_sensitive, sensitive, leaf_outcome, split_criterion, sens_threshold, gamma, backtracking)
 
-    def gain(self, current_data, index_of_attribute, subsets, sensitive_data, current_sens_data):
+    def gain(self, current_data, index_of_attribute, subsets, sensitive_data, current_sens_data, threshold=None):
         """
         Calculate difference (or gain) in value of split criterion according to given split data (i.e., the subsets),
         here information gain.
@@ -60,6 +61,14 @@ class FairClassificationTree(FairTree):
             diff_sens = information_gain(current_data, subsets, self.sensitive_classes, "sensitive", sensitive_data,
                                          current_sens_data)
             diff = (1 - self.gamma) * diff_target - self.gamma * diff_sens
+        elif self.split_criterion == "chebyshev":
+            self.gain_y[(index_of_attribute, threshold)] = information_gain(current_data, subsets, self.target_classes, -1, sensitive_data, current_sens_data)
+            self.gain_s[(index_of_attribute, threshold)] = information_gain(current_data, subsets, self.sensitive_classes, "sensitive", sensitive_data, current_sens_data)
+            diff = 0
+        elif self.split_criterion == "chebyshev_sec_step":
+            objective_target = self.gain_y[(index_of_attribute, threshold)]
+            objective_sensitive = self.gain_s[(index_of_attribute, threshold)]
+            diff = 0  # here: calculate chebyshev formula
         elif self.split_criterion == "spd":
             # minimize statistical parity difference
             diff = -1 * spd(current_data, subsets, sensitive_data, current_sens_data,

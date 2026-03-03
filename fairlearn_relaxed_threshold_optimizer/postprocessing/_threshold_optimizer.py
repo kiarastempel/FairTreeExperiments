@@ -27,9 +27,11 @@ from sklearn.exceptions import NotFittedError
 from sklearn.utils import Bunch
 from sklearn.utils.validation import check_is_fitted
 
-from ..utils._common import _get_soft_predictions
-from ..utils._input_validation import _KW_CONTROL_FEATURES, _validate_and_reformat_input
-from ._constants import (
+import sys
+sys.path.append('../')
+from fairlearn_relaxed_threshold_optimizer.utils._common import _get_soft_predictions
+from fairlearn_relaxed_threshold_optimizer.utils._input_validation import _KW_CONTROL_FEATURES, _validate_and_reformat_input
+from fairlearn_relaxed_threshold_optimizer.postprocessing._constants import (
     BASE_ESTIMATOR_NONE_ERROR_MESSAGE,
     BASE_ESTIMATOR_NOT_FITTED_WARNING,
     LABEL_KEY,
@@ -37,9 +39,9 @@ from ._constants import (
     SCORE_KEY,
     SENSITIVE_FEATURE_KEY,
 )
-from ._interpolated_thresholder import InterpolatedThresholder
-from ._relaxed_constraints import maximize_objective_with_tolerance
-from ._tradeoff_curve_utilities import (
+from fairlearn_relaxed_threshold_optimizer.postprocessing._interpolated_thresholder import InterpolatedThresholder
+from fairlearn_relaxed_threshold_optimizer.postprocessing._relaxed_constraints import maximize_objective_with_tolerance
+from fairlearn_relaxed_threshold_optimizer.postprocessing._tradeoff_curve_utilities import (
     METRIC_DICT,
     _extend_confusion_matrix,
     _interpolate_curve,
