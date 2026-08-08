@@ -32,14 +32,14 @@ from pymoo.operators.repair.rounding import RoundingRepair
 from pymoo.algorithms.moo.nsga2 import NSGA2
 from pymoo.optimize import minimize
 from pymoo.core.mixed import MixedVariableMating, MixedVariableSampling, MixedVariableDuplicateElimination
-from algos_one_tree.method import create_tree
+from algos_one_tree.method import create_tree, compute_fairness
 
 
 class FairnessAurocProblem(ElementwiseProblem):
     """
     Defines a bi-objective optimization problem with the pymoo APIs.
     Here, the "design variables" are the hyperparameters we consider: gamma,
-    min samples and max depth.
+    min samples and max depth
     """
 
     def __init__(self, folds, train_data, pos_outcome=1, unprivileged_group='0',
@@ -78,12 +78,14 @@ class FairnessAurocProblem(ElementwiseProblem):
 
         if self.args.results_path == "default":
             directory = os.path.join(PROJECT_ROOT, 'results_cv_pymoo_' + self.time, str(self.args.data),
-                                     "tradeoffs_one_tree", str(self.args.tree_variant), "seed_" + str(self.args.seed),
+                                     "tradeoffs_one_tree", str(self.args.tree_variant), str(self.args.fairness_metric),
+                                     "seed_" + str(self.args.seed),
                                      "min_samples_" + str(x['min_samples']), "max_depth_" + str(x['max_depth'])
                                                                                                 + "_evalid_" + str(eval_id))
         else:
             directory = os.path.join(self.args.results_path, 'results_cv_pymoo_' + self.time, str(self.args.data),
-                                     "tradeoffs_one_tree", str(self.args.tree_variant), "seed_" + str(self.args.seed),
+                                     "tradeoffs_one_tree", str(self.args.tree_variant), str(self.args.fairness_metric),
+                                     "seed_" + str(self.args.seed),
                                      "min_samples_" + str(x['min_samples']), "max_depth_" + str(x['max_depth'])
                                                                                                 + "_evalid_" + str(eval_id))
 
@@ -97,7 +99,7 @@ class FairnessAurocProblem(ElementwiseProblem):
             results_kf = create_trees(X_train_cv, X_val_cv, y_train_cv, y_val_cv, s_train_cv, s_val_cv, self.unprivileged_group, self.pos_outcome,
                                       self.args.predict_type, self.args.data, self.args.tree_variant, self.args.leaf_outcome_method, x['max_depth'],
                                       min_samples, self.args.max_h_y, self.args.min_h_s, x['gamma'], k, directory,
-                                      intersectional=self.args.intersectional)
+                                      intersectional=self.args.intersectional, fairness_metric=self.args.fairness_metric)
             results.append(results_kf)
             k += 1
 
@@ -182,7 +184,16 @@ def main():
     parser.add_argument('--intersectional', action='store_true',
                         help='Sets up intersectional sensitive attributes and calculation')
 
+    parser.add_argument('--fairness_metric', type=str, default='spd',
+                        help='Fairness metric to optimize, has to be in '
+                             '["spd", "equalized_odds", "accuracy_diff"]. '
+                             'Note: with --intersectional only "spd" is supported.')
+
     args = parser.parse_args()
+
+    if args.intersectional and args.fairness_metric != "spd":
+        raise ValueError('--intersectional only supports --fairness_metric "spd"')
+
     warnings.filterwarnings("ignore")
 
     current_time = time.strftime("%Y-%m-%d")
@@ -246,14 +257,16 @@ def main():
             "results_best_pymoo_" + current_time,
             str(args.data),
             "tradeoffs_one_tree",
-            str(args.tree_variant))
+            str(args.tree_variant),
+            str(args.fairness_metric))
     else:
         results_best_dir = os.path.join(
             args.results_path,
             "results_best_pymoo_" + current_time,
             str(args.data),
             "tradeoffs_one_tree",
-            str(args.tree_variant))
+            str(args.tree_variant),
+        str(args.fairness_metric))
 
     os.makedirs(results_best_dir, exist_ok=True)
 
@@ -280,6 +293,7 @@ def main():
             k_cv="full",  # distinguish from CV folds
             directory=None,
             intersectional=args.intersectional,
+            fairness_metric=args.fairness_metric,
             save_preds=False
         )
 
@@ -312,7 +326,7 @@ def main():
 
 def create_trees(X_train, X_test, y_train, y_test, s_train, s_test, unprivileged_group, pos_outcome, predict_type,
                  data, tree_variant, leaf_outcome_method, max_depth, min_samples, max_h_y, min_h_s, gamma, k_cv,
-                 directory, intersectional=False, save_preds=False):
+                 directory, intersectional=False, fairness_metric="spd", save_preds=False):
     results = {
         "spds_train": [],
         "spds_test": [],
@@ -358,8 +372,10 @@ def create_trees(X_train, X_test, y_train, y_test, s_train, s_test, unprivileged
             spd_train = demographic_parity_difference(y_train, preds_train, sensitive_features=s_train)
             spd_test = demographic_parity_difference(y_test, preds_test, sensitive_features=s_test)
         else:
-            spd_train = statistical_parity_diff(preds_train, np.asarray(s_train), unprivileged_group, pos_outcome)
-            spd_test = statistical_parity_diff(preds_test, np.asarray(s_test), unprivileged_group, pos_outcome)
+            spd_train = compute_fairness(preds_train, y_train, s_train, unprivileged_group,
+                                         pos_outcome, fairness_metric)
+            spd_test = compute_fairness(preds_test, y_test, s_test, unprivileged_group,
+                                        pos_outcome, fairness_metric)
         auroc_train = roc_auc_score(y_train, preds_train)
         auroc_test = roc_auc_score(y_test, preds_test)
         acc_train = accuracy_score(y_train, preds_train)

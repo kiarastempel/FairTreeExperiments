@@ -18,7 +18,7 @@ from sklearn.metrics import roc_auc_score, accuracy_score
 from utils import statistical_parity_diff
 from fairlearn.metrics import demographic_parity_difference
 from constants import PROJECT_ROOT
-from method import create_tree
+from method import create_tree, compute_fairness
 import warnings
 import time
 
@@ -66,10 +66,19 @@ def main():
     parser.add_argument('--num_gammas', type=int, default='50',
                         help='Number of gamma values between 0 and 1')
 
+    parser.add_argument('--fairness_metric', type=str, default='spd',
+                        help='Fairness metric, has to be in ["spd", "equalized_odds", "accuracy_diff"]. '
+                             'Note: with --intersectional only "spd" is supported.')
+
     parser.add_argument('--intersectional', action='store_true',
-                        help='Sets up intersectional sensitive attributes and calculation')
+                        help='Set up sensitive attributes for multi-sensitive fairness '
+                             '(only supported with --fairness_metric spd)')
 
     args = parser.parse_args()
+
+    if args.intersectional and args.fairness_metric != "spd":
+        raise ValueError('--intersectional only supports --fairness_metric "spd"')
+
     warnings.filterwarnings("ignore")
 
     current_time = time.strftime("%H:%M:%S")
@@ -79,11 +88,11 @@ def main():
 
     if args.results_path == "default":
         directory = os.path.join(PROJECT_ROOT, 'results_cv', str(args.data), 'tradeoffs_one_tree',
-                             str(args.tree_variant), "seed_" + str(args.seed),
+                             str(args.tree_variant), str(args.fairness_metric), "seed_" + str(args.seed),
                              "min_samples_" + str(args.min_samples), "max_depth_" + str(args.max_depth))
     else:
         directory = os.path.join(args.results_path, 'results_cv', str(args.data), 'tradeoffs_one_tree',
-                             str(args.tree_variant), "seed_" + str(args.seed),
+                             str(args.tree_variant), str(args.fairness_metric), "seed_" + str(args.seed),
                              "min_samples_" + str(args.min_samples), "max_depth_" + str(args.max_depth))
     os.makedirs(directory, exist_ok=True)
 
@@ -105,7 +114,7 @@ def main():
         create_trees(X_train_cv, X_val_cv, y_train_cv, y_val_cv, s_train_cv, s_val_cv, unprivileged_group, pos_outcome,
                      args.predict_type, args.data, args.tree_variant, args.leaf_outcome_method, args.max_depth,
                      min_samples, args.max_h_y, args.min_h_s, args.num_gammas, k, directory,
-                     intersectional=args.intersectional)
+                     intersectional=args.intersectional, fairness_metric=args.fairness_metric)
 
         k += 1
 
@@ -122,7 +131,7 @@ def main():
 
 def create_trees(X_train, X_test, y_train, y_test, s_train, s_test, unprivileged_group, pos_outcome, predict_type,
                  data, tree_variant, leaf_outcome_method, max_depth, min_samples, max_h_y, min_h_s, num_gammas, k_cv,
-                 directory, intersectional=False):
+                 directory, intersectional=False, fairness_metric="spd"):
     # gamma sweep: create tree for each gamma and evaluate tree
     results = {
         "gammas": [],
@@ -176,8 +185,8 @@ def create_trees(X_train, X_test, y_train, y_test, s_train, s_test, unprivileged
                 spd_train = demographic_parity_difference(y_train, preds_train, sensitive_features=s_train)
                 spd_test = demographic_parity_difference(y_test, preds_test, sensitive_features=s_test)
             else:
-                spd_train = statistical_parity_diff(preds_train, np.asarray(s_train), unprivileged_group, pos_outcome)
-                spd_test = statistical_parity_diff(preds_test, np.asarray(s_test), unprivileged_group, pos_outcome)
+                spd_train = compute_fairness(preds_train, y_train, s_train, unprivileged_group, pos_outcome, fairness_metric)
+                spd_test = compute_fairness(preds_test, y_test, s_test, unprivileged_group, pos_outcome, fairness_metric)
             auroc_train = roc_auc_score(y_train, preds_train)
             auroc_test = roc_auc_score(y_test, preds_test)
             acc_train = accuracy_score(y_train, preds_train)

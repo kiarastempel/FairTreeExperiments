@@ -27,11 +27,11 @@ def main():
 
     parser = argparse.ArgumentParser(description='Get run values.')
 
-    parser.add_argument('--path_input', type=str, default='results_cv_MLJ_old_opt_intersectional/Compas/tradeoffs_one_tree/chebyshev',
+    parser.add_argument('--path_input', type=str, default='results_cv/Compas/tradeoffs_one_tree/chebyshev',
                         help='Path to specific input results folder')
 
     parser.add_argument('--path_output', type=str,
-                        default='results_best_MLJ_old_opt_intersectional_hypervolume/Compas/tradeoffs_one_tree/chebyshev',
+                        default='results_best/Compas/tradeoffs_one_tree/chebyshev',
                         help='Path to specific folder where the output will be saved')
 
     parser.add_argument('--data', type=str, default='Compas',
@@ -64,7 +64,15 @@ def main():
     parser.add_argument('--optimization_objective', type=str, default='hypervolume',
                         help='Objective to optimize on, "autoc" or "hypervolume"')
 
+    parser.add_argument('--fairness_metric', type=str, default='spd',
+                        help='Fairness metric, has to be in ["spd", "equalized_odds", "accuracy_diff"]. '
+                             'Note: with --intersectional only "spd" is supported.')
+
     args = parser.parse_args()
+
+    if args.intersectional and args.fairness_metric != "spd":
+        raise ValueError('--intersectional only supports --fairness_metric "spd"')
+
     warnings.filterwarnings("ignore")
 
     path = os.path.join(PROJECT_ROOT, args.path_input)
@@ -163,8 +171,10 @@ def main():
                     spd_train = demographic_parity_difference(y_train, preds_train, sensitive_features=s_train)
                     spd_test = demographic_parity_difference(y_test, preds_test, sensitive_features=s_test)
                 else:
-                    spd_train = statistical_parity_diff(preds_train, np.asarray(s_train), unprivileged_group, pos_outcome)
-                    spd_test = statistical_parity_diff(preds_test, np.asarray(s_test), unprivileged_group, pos_outcome)
+                    spd_train = compute_fairness(preds_train, y_train, s_train, unprivileged_group,
+                                                 pos_outcome, args.fairness_metric)
+                    spd_test = compute_fairness(preds_test, y_test, s_test, unprivileged_group,
+                                                pos_outcome, args.fairness_metric)
                 auroc_train = roc_auc_score(y_train, preds_train)
                 auroc_test = roc_auc_score(y_test, preds_test)
                 acc_train = accuracy_score(y_train, preds_train)

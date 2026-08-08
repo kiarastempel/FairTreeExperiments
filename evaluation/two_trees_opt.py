@@ -25,11 +25,11 @@ def main():
 
     parser = argparse.ArgumentParser(description='Get run values.')
 
-    parser.add_argument('--path_input', type=str, default='results_cv_MLJ_old_opt/Folktables_HI/tradeoffs_two_tree/meta_tree_AND_fairness_gain_AND_sklearn',
+    parser.add_argument('--path_input', type=str, default='results_cv/Folktables_HI/tradeoffs_two_tree/meta_tree_AND_fairness_gain_AND_sklearn',
                         help='Path to specific input results folder')
 
     parser.add_argument('--path_output', type=str,
-                        default='results_best_MLJ_old_opt_hypervolume/Folktables_HI/tradeoffs_two_tree/meta_tree_AND_fairness_gain_AND_sklearn',
+                        default='results_best/Folktables_HI/tradeoffs_two_tree/meta_tree_AND_fairness_gain_AND_sklearn',
                         help='Path to specific folder where the output will be saved')
 
     parser.add_argument('--data', type=str, default='Folktables_HI',
@@ -81,7 +81,15 @@ def main():
     parser.add_argument('--optimization_objective', type=str, default='hypervolume',
                         help='Objective to optimize on, "autoc" or "hypervolume"')
 
+    parser.add_argument('--fairness_metric', type=str, default='spd',
+                        help='Fairness metric, has to be in ["spd", "equalized_odds", "accuracy_diff"]. '
+                             'Note: with --intersectional only "spd" is supported.')
+
     args = parser.parse_args()
+
+    if args.intersectional and args.fairness_metric != "spd":
+        raise ValueError('--intersectional only supports --fairness_metric "spd"')
+
     warnings.filterwarnings("ignore")
 
     path = os.path.join(PROJECT_ROOT, args.path_input)
@@ -171,7 +179,7 @@ def main():
                               best_min_samples, args.data,
                               args.fair_tree_variant, args.performance_tree_variant, best_max_depth, args.split_criterion,
                               args.num_gammas, timed_run=False, print_trees=False, intersectional=args.intersectional,
-                              combination=args.combination)
+                              combination=args.combination, fairness_metric=args.fairness_metric)
 
         pd.DataFrame(results).to_csv(
             os.path.join(directory, 'best_results_seed_{}_min_samples_{}_max_depth_{}).csv'.format(

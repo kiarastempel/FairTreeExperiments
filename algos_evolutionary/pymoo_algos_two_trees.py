@@ -12,7 +12,7 @@ sys.path.append('../algos_one_tree')
 sys.path.append('../FairTree')
 sys.path.append('../')
 
-from algos_two_trees.method import create_performance_tree, create_fair_tree, combined_predict_proba, combined_predict
+from algos_two_trees.method import create_performance_tree, create_fair_tree, combined_predict_proba, combined_predict, compute_fairness
 import warnings
 import time
 import copy
@@ -73,12 +73,14 @@ class FairnessAurocProblem(ElementwiseProblem):
             directory = os.path.join(PROJECT_ROOT, 'results_cv_pymoo_' + self.time, str(self.args.data),
                                      "tradeoffs_two_trees",
                                      str(self.args.combination) + "_AND_" + str(self.args.fair_tree_variant) + "_AND_" + str(self.args.performance_tree_variant),
+                                     str(self.args.fairness_metric),
                                      "seed_" + str(self.args.seed),
                                      "min_samples_" + str(x['min_samples']), "max_depth_" + str(x['max_depth']))  #  + "_evalid_" + str(eval_id))
         else:
             directory = os.path.join(self.args.results_path, 'results_cv_pymoo_' + self.time, str(self.args.data),
                                      "tradeoffs_two_trees",
                                      str(self.args.combination) + "_AND_" + str(self.args.fair_tree_variant) + "_AND_" + str(self.args.performance_tree_variant),
+                                     str(self.args.fairness_metric),
                                      "seed_" + str(self.args.seed),
                                      "min_samples_" + str(x['min_samples']), "max_depth_" + str(x['max_depth']))  #  + "_evalid_" + str(eval_id))
 
@@ -95,7 +97,8 @@ class FairnessAurocProblem(ElementwiseProblem):
                                       self.args.performance_tree_variant,  self.args.num_performance_ensemble,
                                       self.args.leaf_outcome_method, self.args.split_criterion, x['max_depth'],
                                       min_samples, self.args.max_h_y, self.args.min_h_s, x['gamma'], k, directory,
-                                      intersectional=self.args.intersectional, combination=self.args.combination)
+                                      intersectional=self.args.intersectional, fairness_metric=self.args.fairness_metric,
+                                      combination=self.args.combination)
             results.append(results_kf)
             k += 1
 
@@ -199,7 +202,16 @@ def main():
                         help='How the predictions of the performance tree and the fair tree are combined '
                              '["linear", "meta_tree", "meta_tree_optimization"]')
 
+    parser.add_argument('--fairness_metric', type=str, default='spd',
+                        help='Fairness metric to optimize, has to be in '
+                             '["spd", "equalized_odds", "accuracy_diff"]. '
+                             'Note: with --intersectional only "spd" is supported.')
+
     args = parser.parse_args()
+
+    if args.intersectional and args.fairness_metric != "spd":
+        raise ValueError('--intersectional only supports --fairness_metric "spd"')
+
     warnings.filterwarnings("ignore")
 
     current_time = time.strftime("%Y-%m-%d")
@@ -263,7 +275,8 @@ def main():
             str(args.data),
             "tradeoffs_two_trees",
             str(args.combination) + "_AND_" + str(args.fair_tree_variant) + "_AND_" + str(
-                args.performance_tree_variant)
+                args.performance_tree_variant),
+            str(args.fairness_metric)
         )
     else:
         results_best_dir = os.path.join(
@@ -272,7 +285,8 @@ def main():
             str(args.data),
             "tradeoffs_two_trees",
             str(args.combination) + "_AND_" + str(args.fair_tree_variant) + "_AND_" + str(
-                args.performance_tree_variant)
+                args.performance_tree_variant),
+            str(args.fairness_metric)
         )
 
     os.makedirs(results_best_dir, exist_ok=True)
@@ -303,6 +317,7 @@ def main():
             directory=None,
             intersectional=args.intersectional,
             combination=args.combination,
+            fairness_metric=args.fairness_metric,
             save_preds=False
         )
 
@@ -336,7 +351,7 @@ def main():
 def create_trees(X_train, X_test, y_train, y_test, s_train, s_test, unprivileged_group, pos_outcome, predict_type,
                  data, fair_tree_variant, num_fair_ensemble, performance_tree_variant, num_performance_ensemble,
                  leaf_outcome_method, split_criterion, max_depth, min_samples, max_h_y, min_h_s, gamma, k_cv,
-                 directory, intersectional=False, combination='linear', save_preds=False):
+                 directory, intersectional=False, combination='linear', fairness_metric="spd", save_preds=False):
     results = {
         "spds_train": [],
         "spds_test": [],
@@ -473,8 +488,10 @@ def create_trees(X_train, X_test, y_train, y_test, s_train, s_test, unprivileged
             spd_train = demographic_parity_difference(y_train, preds_train, sensitive_features=s_train)
             spd_test = demographic_parity_difference(y_test, preds_test, sensitive_features=s_test)
         else:
-            spd_train = statistical_parity_diff(preds_train, np.asarray(s_train), unprivileged_group, pos_outcome)
-            spd_test = statistical_parity_diff(preds_test, np.asarray(s_test), unprivileged_group, pos_outcome)
+            spd_train = compute_fairness(preds_train, y_train, s_train, unprivileged_group,
+                                         pos_outcome, fairness_metric)
+            spd_test = compute_fairness(preds_test, y_test, s_test, unprivileged_group,
+                                        pos_outcome, fairness_metric)
         auroc_train = roc_auc_score(y_train, preds_train)
         auroc_test = roc_auc_score(y_test, preds_test)
         acc_train = accuracy_score(y_train, preds_train)

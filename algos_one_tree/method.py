@@ -14,7 +14,7 @@ from get_data import data_loader_router
 from sklearn.metrics import roc_auc_score, accuracy_score
 from fair_classification_tree import FairClassificationTree
 from utils import statistical_parity_diff
-from fairlearn.metrics import demographic_parity_difference
+from fairlearn.metrics import demographic_parity_difference, equalized_odds_difference, MetricFrame
 from constants import PROJECT_ROOT
 import time
 
@@ -56,6 +56,10 @@ def main():
     parser.add_argument('--num_gammas', type=int, default='50',
                         help='Number of gamma values between 0 and 1')
 
+    parser.add_argument('--fairness_metric', type=str, default='spd',
+                        help='Fairness metric, has to be in ["spd", "equalized_odds", "accuracy_diff"]. '
+                             'Note: with --intersectional only "spd" is supported.')
+
     parser.add_argument('--timed-run', action='store_true',
                         help='Do a timed run, ignoring most disk I/O')
     
@@ -67,9 +71,13 @@ def main():
                         help='Print the trees for interpretation')
 
     parser.add_argument('--intersectional', action='store_true',
-                        help='Set up sensitive attributes for multi-sensitive fairness')
+                        help='Set up sensitive attributes for multi-sensitive fairness '
+                             '(only supported with --fairness_metric spd)')
 
     args = parser.parse_args()
+
+    if args.intersectional and args.fairness_metric != "spd":
+        raise ValueError('--intersectional only supports --fairness_metric "spd"')
 
     X, y, s, unprivileged_group, pos_outcome = data_loader_router(args.data, args.intersectional)
 
@@ -91,12 +99,26 @@ def main():
                  args.data, args.tree_variant, args.leaf_outcome_method, args.max_depth, min_samples,
                  args.max_h_y, args.min_h_s,
                  args.num_gammas, args.timed_run, args.timed_ncols, args.timed_nrows, args.print_trees,
-                 intersectional=args.intersectional)
+                 intersectional=args.intersectional, fairness_metric=args.fairness_metric)
+
+
+def compute_fairness(preds, y_true, s, unprivileged_group, pos_outcome, fairness_metric):
+    s_flat = np.asarray(s).flatten()
+    if fairness_metric == "spd":
+        return statistical_parity_diff(preds, np.asarray(s), unprivileged_group, pos_outcome)
+    elif fairness_metric == "equalized_odds":
+        return equalized_odds_difference(y_true, preds, sensitive_features=s_flat)
+    elif fairness_metric == "accuracy_diff":
+        mf = MetricFrame(metrics=accuracy_score, y_true=y_true, y_pred=preds,
+                         sensitive_features=s_flat)
+        return mf.difference()  # max. Differenz der Accuracy zwischen den Gruppen
+    else:
+        raise ValueError('fairness_metric has to be in ["spd", "equalized_odds", "accuracy_diff"]')
 
 
 def create_trees(X_train, X_test, y_train, y_test, s_train, s_test, unprivileged_group, pos_outcome, predict_type,
                  data, tree_variant, leaf_outcome_method, max_depth, min_samples, max_h_y, min_h_s,
-                 num_gammas, timed_run, n_cols, n_rows, print_trees, intersectional=False):
+                 num_gammas, timed_run, n_cols, n_rows, print_trees, intersectional=False, fairness_metric="spd"):
 
     start = time.time()
     if timed_run:
@@ -139,8 +161,8 @@ def create_trees(X_train, X_test, y_train, y_test, s_train, s_test, unprivileged
                 spd_train = demographic_parity_difference(y_train, preds_train, sensitive_features=s_train)
                 spd_test = demographic_parity_difference(y_test, preds_test, sensitive_features=s_test)
             else:
-                spd_train = statistical_parity_diff(preds_train, np.asarray(s_train), unprivileged_group, pos_outcome)
-                spd_test = statistical_parity_diff(preds_test, np.asarray(s_test), unprivileged_group, pos_outcome)
+                spd_train = compute_fairness(preds_train, y_train, s_train, unprivileged_group, pos_outcome, fairness_metric)
+                spd_test = compute_fairness(preds_test, y_test, s_test, unprivileged_group, pos_outcome, fairness_metric)
             auroc_train = roc_auc_score(y_train, preds_train)
             auroc_test = roc_auc_score(y_test, preds_test)
             acc_train = accuracy_score(y_train, preds_train)
@@ -154,16 +176,19 @@ def create_trees(X_train, X_test, y_train, y_test, s_train, s_test, unprivileged
             results["accs_test"].append(acc_test)
     
     # save results to csv
+    os.makedirs(os.path.join(PROJECT_ROOT, 'results_test', 'tradeoffs_one_tree'), exist_ok=True)
     if timed_run:
         end = time.time()
-        file_path = os.path.join(PROJECT_ROOT, 'results_MLJ', 'tradeoffs_one_tree', 'time_{}_{}_{}.csv'.format(data, predict_type, tree_variant))
+        file_path = os.path.join(PROJECT_ROOT, 'results_test', 'tradeoffs_one_tree', 'time_{}_{}_{}.csv'.format(data, predict_type, tree_variant))
         header = not os.path.exists(file_path)
         time_results = pd.DataFrame({'time elapsed': [end - start], 'number of columns': n_cols,
                                      'number of rows': n_rows, 'max depth': max_depth})
         time_results.to_csv(file_path, mode='a', header=header, index=False)
     else:
-        file_path = os.path.join(PROJECT_ROOT, 'results_MLJ', 'tradeoffs_one_tree', 'hy_{}_hs_{}_results_{}_{}_{}_seed_{}_min_samples_{}_max_depth_{}.csv'.format(
-                max_h_y, min_h_s, data, predict_type, tree_variant, seed, min_samples, max_depth))
+        file_path = os.path.join(PROJECT_ROOT, 'results_test', 'tradeoffs_one_tree',
+                                 'hy_{}_hs_{}_results_{}_{}_{}_{}_seed_{}_min_samples_{}_max_depth_{}.csv'.format(
+                                     max_h_y, min_h_s, data, predict_type, tree_variant, fairness_metric, seed,
+                                     min_samples, max_depth))
         pd.DataFrame(results).to_csv(file_path)
     print('Saved results to {}'.format(file_path))
 

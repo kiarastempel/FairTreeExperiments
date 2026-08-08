@@ -23,14 +23,18 @@ seed = 42
 def main():
     parser = argparse.ArgumentParser(description='Get run values.')
 
-    parser.add_argument('--data', type=str, default='Adult',
+    parser.add_argument('--data', type=str, default='Dutch',
                         help='Dataset to use: Compas, Adult, Banks, German, Law, Dutch')
 
-    parser.add_argument('--path_input', type=str, default='results_best_MLJ_SMS_opt',
+    parser.add_argument('--path_input', type=str, default='results_cv_SMS/results_best_pymoo_SMS2026-07-26',
                         help='Path to specific input results folder')
 
-    parser.add_argument('--path_output', type=str, default='results_best_MLJ_SMS_opt',
+    parser.add_argument('--path_output', type=str, default='results_cv_SMS/results_best_pymoo_SMS2026-07-26',
                         help='Path to specific folder where the output will be saved')
+
+    parser.add_argument('--fairness_metric', type=str, default='accuracy_diff',
+                        help='Fairness metric, has to be in ["spd", "equalized_odds", "accuracy_diff"]. '
+                             'Note: with --intersectional only "spd" is supported.')
 
     parser.add_argument('--method', type=str,
                         default='all',
@@ -41,13 +45,15 @@ def main():
                                  "backtracking",
                                  "postprocessing",
                                  "chebyshev",
+                                 "gp_nsga2",
+                                 "gp_sms",
                                  "all"
                                  ])
 
     args = parser.parse_args()
 
-    os.makedirs(os.path.join(PROJECT_ROOT, args.path_output, 'plots'), exist_ok=True)
-    os.makedirs(os.path.join(PROJECT_ROOT, args.path_output, 'evaluation'), exist_ok=True)
+    os.makedirs(os.path.join(PROJECT_ROOT, args.path_output, 'plots_' + args.fairness_metric + "/"), exist_ok=True)
+    os.makedirs(os.path.join(PROJECT_ROOT, args.path_output, 'evaluation_' + args.fairness_metric + "/"), exist_ok=True)
 
     methods = ["Two trees linear",
                "Two trees meta tree",
@@ -56,7 +62,9 @@ def main():
                "One tree (constrained split criterion)",
                "One tree (backtracking)",
                # "Threshold optimizer",
-               "One Tree (chebyshev)"
+               "One Tree (chebyshev)",
+               "GP tree (NSGA-II)",
+               "GP tree (SMS-EMOA)"
                ]
 
     file_names = ["two_trees_linear",
@@ -66,17 +74,21 @@ def main():
                   "constrained",
                   "backtracking",
                   # "postprocessing",
-                  "chebyshev"
+                  "chebyshev",
+                  "gp_nsga2",
+                  "gp_sms"
                   ]
 
-    method_directories = ["tradeoffs_two_tree/linear_AND_fairness_gain_AND_own",
-                          "tradeoffs_two_tree/meta_tree_AND_fairness_gain_AND_own",
-                          "tradeoffs_two_tree/meta_tree_optimization_AND_fairness_gain_AND_own",
-                          "tradeoffs_one_tree/weighted_combi",
-                          "tradeoffs_one_tree/threshold_gain_s",
-                          "tradeoffs_one_tree/backtracking",
+    method_directories = ["tradeoffs_two_tree/linear_AND_fairness_gain_AND_own/" + args.fairness_metric,
+                          "tradeoffs_two_tree/meta_tree_AND_fairness_gain_AND_own/" + args.fairness_metric,
+                          "tradeoffs_two_tree/meta_tree_optimization_AND_fairness_gain_AND_own/" + args.fairness_metric,
+                          "tradeoffs_one_tree/weighted_combi/" + args.fairness_metric,
+                          "tradeoffs_one_tree/threshold_gain_s/" + args.fairness_metric,
+                          "tradeoffs_one_tree/backtracking/" + args.fairness_metric,
                           # "relaxed_threshold_optimizer",
-                          "tradeoffs_one_tree/chebyshev"
+                          "tradeoffs_one_tree/chebyshev/" + args.fairness_metric,
+                          "tradeoffs_gp_tree/nsga2",
+                          "tradeoffs_gp_tree/sms"
                           ]
 
     if args.method != 'all':
@@ -123,13 +135,13 @@ def main():
         avg_curve, results = get_avg_dataframe(method_full_path, results)
         avg_curve["1-spds_test"] = 1 - avg_curve["spds_test"]
         # plt.scatter(avg_curve["aurocs_test"], avg_curve["1-spds_test"], label=method)
-        pd.DataFrame(avg_curve).to_csv(os.path.join(PROJECT_ROOT, args.path_output, 'plots', "avg_curve_" + args.data + "_" + file_names[i] + ".csv"))
+        pd.DataFrame(avg_curve).to_csv(os.path.join(PROJECT_ROOT, args.path_output, 'plots_' + args.fairness_metric, "avg_curve_" + args.data + "_" + file_names[i] + ".csv"))
 
         #plot_all_best_curves(method_full_path, avg_curve)
 
     # plt.legend()
     # plt.show()
-    pd.DataFrame(results).to_csv(os.path.join(PROJECT_ROOT, args.path_output, 'evaluation', args.data + ".csv"))
+    pd.DataFrame(results).to_csv(os.path.join(PROJECT_ROOT, args.path_output, 'evaluation_' + args.fairness_metric, args.data + ".csv"))
 
 
 def get_avg_dataframe(directory, results):
@@ -190,8 +202,38 @@ def get_avg_dataframe(directory, results):
 
     # Calculate averaged dataframe
     combined_df = pd.concat(dataframes)
-    averaged_df = combined_df.groupby('gammas')[['spds_test', 'aurocs_test', 'spds_train', 'aurocs_train']].mean().reset_index()
+    if 'gammas' in combined_df.columns:
+        # gamma-parameterised methods: seeds align by gamma, so average per gamma value
+        averaged_df = combined_df.groupby('gammas')[['spds_test', 'aurocs_test', 'spds_train', 'aurocs_train']].mean().reset_index()
+    else:
+        # methods without a gamma parameterisation (e.g. GP structural MOO): fronts are not
+        # aligned across seeds, so pool all seeds and keep the non-dominated (Pareto) points
+        averaged_df = pooled_pareto_curve(combined_df)
     return averaged_df, results
+
+
+def pooled_pareto_curve(df):
+    """
+    Summary curve for methods whose per-seed fronts are not aligned by a shared parameter:
+    pool every seed's points and return the non-dominated (Pareto-optimal) subset.
+
+    Dominance is evaluated on (aurocs_test, 1 - spds_test) with both higher-is-better,
+    matching ``num_local_pareto_points``. Train columns (if present) are carried along.
+    """
+    df = df.reset_index(drop=True)
+    a = df['aurocs_test'].to_numpy()
+    f = 1.0 - df['spds_test'].to_numpy()  # higher is better
+    keep = []
+    for i in range(len(df)):
+        dominated = False
+        for j in range(len(df)):
+            if j != i and a[j] > a[i] and f[j] > f[i]:
+                dominated = True
+                break
+        if not dominated:
+            keep.append(i)
+    cols = [c for c in ['spds_test', 'aurocs_test', 'spds_train', 'aurocs_train'] if c in df.columns]
+    return df.iloc[keep][cols].drop_duplicates().reset_index(drop=True)
 
 
 def plot_all_best_curves(directory, avg_dataframe):

@@ -11,6 +11,12 @@ def data_loader_router(identifier, intersectional):
         X, y, s, unprivileged_group, pos_outcome = get_compas(intersectional=intersectional)
     elif identifier == "Adult":
         X, y, s, unprivileged_group, pos_outcome = get_adult(intersectional=intersectional)
+    elif identifier == "Banks":
+        X, y, s, unprivileged_group, pos_outcome = get_banks(intersectional=intersectional)
+    elif identifier == "German":
+        X, y, s, unprivileged_group, pos_outcome = get_german(intersectional=intersectional)
+    elif identifier == "Law":
+        X, y, s, unprivileged_group, pos_outcome = get_law(intersectional=intersectional)
     elif identifier == "Dutch":
         X, y, s, unprivileged_group, pos_outcome = get_dutch_census(intersectional=intersectional)
     elif identifier == "Folktables_AK":
@@ -146,6 +152,57 @@ def get_dutch_census(url=os.path.join(PROJECT_ROOT, 'data', 'dutch_census_2001.c
     return X, pd.Series(y), s_orig, unprivileged_group, pos_outcome
 
 
+def get_german(file=os.path.join(PROJECT_ROOT, 'data', 'german-credit.csv'), intersectional=False):
+    df = pd.read_csv(file, sep=',', header=0)
+
+    integer_features = ["duration", "amount", "installment_rate", "present_residence", "age", "number_credits",
+                        "people_liable"]
+    binary_features = ["telephone", "foreign_worker"]
+    categorical_features = ["status", "credit_history", "purpose", "savings", "employment_duration",
+                            "personal_status_sex", "other_debtors", "property", "other_installment_plans", "housing",
+                            "job"]
+
+    # Convert numerical features to floats or ints
+    for feature in integer_features:
+        df[feature] = df[feature].astype('int')
+
+    for feature in binary_features:
+        df[feature] = df[feature].map({'yes': 1, 'no': 0})
+
+    s_orig = df['age']
+    s_orig = [0 if age <= 25 else 1 for age in s_orig]
+
+    if intersectional:
+        categorical_features.remove('personal_status_sex')
+        s_add = df['personal_status_sex']
+        s_orig = np.array(s_orig).astype(str)
+        s_orig = s_orig + '_' + s_add
+        s_orig = s_orig.rename('isOlderThan25_personal_status_sex')
+        s_orig = s_orig.to_frame()
+        unprivileged_group = '0_Female : single'  # guesswork
+        print(s_orig)
+        df = df.drop(['personal_status_sex'], axis=1)
+
+    else:
+        unprivileged_group = 0
+
+    # One-hot encode categorical features
+    df_encoded = pd.get_dummies(df, columns=categorical_features)
+
+    # Separate features and target variable
+    y_orig = df_encoded['credit_risk']
+    X = df_encoded.drop(['age', 'credit_risk'], axis=1)
+
+    # Encode 'y' (target variable) as 0 (bad credit risk) or 1 (good credit risk)
+    y = [0 if val == 0 else 1 for val in y_orig]
+
+    # Define unprivileged group and positive outcome
+    unprivileged_group = 0  # Young means unprivileged
+    pos_outcome = 1  # Good credit risk
+
+    return X, pd.Series(y), s_orig, unprivileged_group, pos_outcome
+
+
 def get_folktables(state='AK', file=os.path.join(PROJECT_ROOT, 'data', 'folktables_{}_Income_2017.csv'),
                    intersectional=False):
     file = file.format(state)
@@ -180,3 +237,84 @@ def get_folktables(state='AK', file=os.path.join(PROJECT_ROOT, 'data', 'folktabl
     pos_outcome = 1  # high income
 
     return X, pd.Series(y), list(s), unprivileged_group, pos_outcome
+
+
+def get_banks(intersectional=False):
+    column_names = ['age', 'job', 'marital', 'education', 'default', 'balance', 'housing', 'loan',
+                    'contact', 'day', 'month', 'duration', 'campaign', 'pdays', 'previous', 'poutcome', 'y']
+    df = pd.read_csv(os.path.join(PROJECT_ROOT, 'data', 'bank.csv'), delimiter=';')
+
+    s_orig = df['age']
+
+    numerical_features = ['age', 'balance', 'day', 'duration', 'campaign', 'pdays', 'previous']
+
+    # One-hot encode categorical features
+    categorical_features = ['job', 'marital', 'education', 'default', 'housing', 'loan', 'contact', 'month', 'poutcome']
+
+    s = []
+    for age in s_orig:
+        if int(age) < 25:
+            s.append(0)  # Young
+        else:
+            s.append(1)  # Old
+
+    if intersectional:
+        categorical_features.remove('marital')
+        s_add = df['marital']
+        s_orig = np.array([str(si) for si in s])
+        s_orig = s_orig + '_' + s_add
+        s_orig = s_orig.rename('isOlderThan25_marital')
+        s_orig = s_orig.to_frame()
+        unprivileged_group = '0_Divorced'  # only guesswork
+        df = df.drop(['marital'], axis=1)
+    else:
+        unprivileged_group = 0
+
+    df_encoded = pd.get_dummies(df, columns=categorical_features)
+    # Separate features and target variable
+    X = df_encoded.drop(['age', 'y'], axis=1)
+    y_orig = df_encoded['y']
+
+    # Encode y as 0/1
+    y = []
+    for target in y_orig:
+        if 'no' in target:
+            y.append(0)
+        else:
+            y.append(1)
+
+    pos_outcome = 1  # "yes"
+
+    return X, pd.Series(y), s_orig, unprivileged_group, pos_outcome
+
+
+def get_law(url=os.path.join(PROJECT_ROOT, 'data', 'law_dataset.csv'), intersectional=False):
+    column_names = ['decile1b', 'decile3', 'lsat', 'ugpa', 'zfygpa', 'zgpa', 'fulltime', 'fam_inc', 'male', 'race',
+                    'tier', 'pass_bar']
+    df = pd.read_csv(os.path.join(PROJECT_ROOT, 'data', url), delimiter=',')
+    # Drop rows with missing values
+    df = df.dropna().reset_index(drop=True)
+    s_orig = df['race']
+    numerical_features = ['decile1b', 'decile3', 'lsat', 'ugpa', 'zfygpa', 'zgpa']
+
+    # One-hot encode categorical features
+    categorical_features = ['fulltime', 'fam_inc', 'male', 'tier']
+
+    if intersectional:
+        categorical_features.remove('male')
+        s_add = df['male'].astype(int).astype(str).to_numpy()
+        s_orig = s_orig.astype(int).astype(str).to_numpy()
+        s_orig = s_orig + '_' + s_add
+        s_orig = pd.DataFrame(s_orig, columns=['black_female'])
+        unprivileged_group = '0_0'
+        df = df.drop(['male'], axis=1)
+    else:
+        unprivileged_group = 0
+
+    df_encoded = pd.get_dummies(df, columns=categorical_features)
+
+    # Separate features and target variable
+    X = df_encoded.drop(['race', 'pass_bar'], axis=1)
+    y_orig = df_encoded['pass_bar']
+    pos_outcome = 1
+    return X, pd.Series(y_orig), s_orig, unprivileged_group, pos_outcome

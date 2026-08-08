@@ -19,7 +19,7 @@ from sklearn.metrics import roc_auc_score, accuracy_score
 from utils import statistical_parity_diff
 from fairlearn.metrics import demographic_parity_difference
 from constants import PROJECT_ROOT
-from method import create_performance_tree, create_fair_tree, combined_predict_proba, combined_predict
+from method import create_performance_tree, create_fair_tree, combined_predict_proba, combined_predict, compute_fairness
 import warnings
 import optuna
 from FairTree.fair_classification_tree import FairClassificationTree
@@ -83,14 +83,23 @@ def main():
     parser.add_argument('--num_gammas', type=int, default='50',
                         help='Number of gamma values between 0 and 1')
 
+    parser.add_argument('--fairness_metric', type=str, default='spd',
+                        help='Fairness metric, has to be in ["spd", "equalized_odds", "accuracy_diff"]. '
+                             'Note: with --intersectional only "spd" is supported.')
+
     parser.add_argument('--intersectional', action='store_true',
-                        help='Employ multiple sensitive attributes in data loaders')
+                        help='Employ multiple sensitive attributes in data loaders '
+                             '(only supported with --fairness_metric spd)')
 
     parser.add_argument('--combination', type=str, default='meta_tree',
                         help='How the predictions of the performance tree and the fair tree are combined '
                              '["linear", "meta_tree", "meta_tree_optimization"]')
 
     args = parser.parse_args()
+
+    if args.intersectional and args.fairness_metric != "spd":
+        raise ValueError('--intersectional only supports --fairness_metric "spd"')
+
     warnings.filterwarnings("ignore")
 
     X, y, s, unprivileged_group, pos_outcome = data_loader_router(args.data, args.intersectional)
@@ -99,6 +108,7 @@ def main():
         directory = os.path.join(PROJECT_ROOT, 'results_cv', str(args.data),
                                  'tradeoffs_two_tree',
                                  str(args.combination) + "_AND_" + str(args.fair_tree_variant) + "_AND_" + str(args.performance_tree_variant),
+                                 str(args.fairness_metric),
                                  "seed_" + str(args.seed),
                                  "min_samples_" + str(args.min_samples),
                                  "max_depth_" + str(args.max_depth),
@@ -108,6 +118,7 @@ def main():
         directory = os.path.join(args.results_path, 'results_cv', str(args.data),
                                  'tradeoffs_two_tree',
                                  str(args.combination) + "_AND_" + str(args.fair_tree_variant) + "_AND_" + str(args.performance_tree_variant),
+                                 str(args.fairness_metric),
                                  "seed_" + str(args.seed),
                                  "min_samples_" + str(args.min_samples),
                                  "max_depth_" + str(args.max_depth),
@@ -135,7 +146,7 @@ def main():
                       args.data, args.fair_tree_variant, args.num_fair_ensemble, args.performance_tree_variant,
                       args.num_performance_ensemble, args.leaf_outcome_method, args.split_criterion,
                       args.max_depth, min_samples, args.max_h_y, args.min_h_s, args.num_gammas, k, directory,
-                      args.intersectional, args.combination)
+                      args.intersectional, args.combination, fairness_metric=args.fairness_metric)
 
         k += 1
 
@@ -154,7 +165,7 @@ def combine_trees(X_train, X_test, y_train, y_test, s_train, s_test, unprivilege
                   data, fair_tree_variant, num_fair_ensemble, performance_tree_variant, num_performance_ensemble,
                   leaf_outcome_method, split_criterion, max_depth,
                   min_samples, max_h_y, min_h_s, num_gammas, k_cv, directory, intersectional=False,
-                  combination="linear"):
+                  combination="linear", fairness_metric="spd"):
     # get predictions of both separate trees
     y_preds_train, y_preds_test = create_performance_tree(X_train, y_train, s_train, X_test, y_test,
                                                           performance_tree_variant, num_performance_ensemble,
@@ -172,7 +183,8 @@ def combine_trees(X_train, X_test, y_train, y_test, s_train, s_test, unprivilege
     # gamma sweep: combine separate predictions using various gamma values
     results = gamma_sweep(predict_type, y_preds_train, y_preds_test, fair_preds_train, fair_preds_test, s_train, s_test,
                           y_train, y_test, unprivileged_group, pos_outcome, max_depth, min_samples, num_gammas, k_cv,
-                          directory, intersectional=intersectional, combination=combination)
+                          directory, intersectional=intersectional, combination=combination,
+                          fairness_metric=fairness_metric)
 
     # save results to csv
     pd.DataFrame(results).to_csv(os.path.join(directory, 'results_fold{}.csv'.format(k_cv)))
@@ -180,7 +192,7 @@ def combine_trees(X_train, X_test, y_train, y_test, s_train, s_test, unprivilege
 
 def gamma_sweep(predict_type, y_preds_train, y_preds_test, fair_preds_train, fair_preds_test, s_train, s_test,
                 y_train, y_test, unprivileged_group, pos_outcome, max_depth, min_samples,
-                num_gammas, k_cv, directory, intersectional=False, combination="linear"):
+                num_gammas, k_cv, directory, intersectional=False, combination="linear", fairness_metric="spd"):
     results = {
         "gammas": [],
         "spds_train": [],
@@ -302,8 +314,8 @@ def gamma_sweep(predict_type, y_preds_train, y_preds_test, fair_preds_train, fai
             spd_train = demographic_parity_difference(y_train, preds_train, sensitive_features=s_train)
             spd_test = demographic_parity_difference(y_test, preds_test, sensitive_features=s_test)
         else:
-            spd_train = statistical_parity_diff(preds_train, np.asarray(s_train), unprivileged_group, pos_outcome)
-            spd_test = statistical_parity_diff(preds_test, np.asarray(s_test), unprivileged_group, pos_outcome)
+            spd_train = compute_fairness(preds_train, y_train, s_train, unprivileged_group, pos_outcome, fairness_metric)
+            spd_test = compute_fairness(preds_test, y_test, s_test, unprivileged_group, pos_outcome, fairness_metric)
 
         auroc_train = roc_auc_score(y_train, preds_train)
         auroc_test = roc_auc_score(y_test, preds_test)
